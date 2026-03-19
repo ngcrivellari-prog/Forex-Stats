@@ -1,0 +1,3 @@
+En **FOREX-STATS** está el código ; se ejecuta en google collab.
+¡¡OJO!! ; EJECUTAR LA PRIMERA CELDA , LUEGO LA SEGUNDA ETC...
+ESTÁN DELIMITADAS POR UN MENSAJE QUE DICE:
