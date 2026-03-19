@@ -1,9 +1,11 @@
 FX
-#PRIMERA CELDA -INSTALACIÓN
+#PRIMERA CELDA -INSTALACIÓN ##
 !pip install -q openpyxl
 from IPython.display import clear_output
 clear_output()
 print('OK')
+
+####EJECUTE HASTA AQUI Y DALE A CLICK EN +CÓDIGO EN GOOGLE COLLAB
 
 
 #### SEGUNDA CELDA ###
@@ -1085,7 +1087,7 @@ def mostrar_analisis(df, ticker, temp, T):
 
     print('\nAnalisis interactivo completado.')
 
-
+####EJECUTE HASTA AQUI Y DALE A CLICK EN +CÓDIGO EN GOOGLE COLLAB
 ##3ERA CELDA - DESCARGA##
 
 # CELDA 3 - Interfaz de Descarga
@@ -1203,6 +1205,8 @@ display(widgets.VBox([
     widgets.HTML('<br>'), w_btn, w_out,
 ], layout=widgets.Layout(padding='10px')))
 
+
+####EJECUTE HASTA AQUI Y DALE A CLICK EN +CÓDIGO EN GOOGLE COLLAB
 ##4TA VISUALIZACIÓN##
 
 # CELDA 4 - Graficos Interactivos + Analisis Estadistico
