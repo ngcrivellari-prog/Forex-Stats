@@ -1,0 +1,1224 @@
+# -*- coding: utf-8 -*-
+"""FOREX COLLECTOR """
+
+# =============================================================================
+# CELDA 1: INSTALACIÓN
+# =============================================================================
+!pip install -q openpyxl plotly ipywidgets requests pandas numpy urllib3
+from IPython.display import clear_output
+clear_output()
+print('✅ Librerías instaladas correctamente')
+
+# =============================================================================
+# CELDA 2: TODAS LAS FUNCIONES (CORREGIDAS)
+# =============================================================================
+
+import os, warnings
+import requests
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import ipywidgets as widgets
+from datetime import datetime, timedelta
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from IPython.display import display, clear_output, HTML
+from google.colab import files
+import openpyxl
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+
+warnings.filterwarnings('ignore')
+
+# Paleta de colores
+C = {
+    'bg':'#1e1e2e','surface':'#181825','overlay':'#313244',
+    'text':'#cdd6f4','subtext':'#a6adc8',
+    'blue':'#89b4fa','green':'#a6e3a1','red':'#f38ba8',
+    'yellow':'#f9e2af','peach':'#fab387','mauve':'#cba6f7',
+    'teal':'#94e2d5','sky':'#89dceb','pink':'#f5c2e7',
+    'lavender':'#b4befe',
+}
+
+# Layout base para todos los graficos Plotly
+LAYOUT_BASE = dict(
+    paper_bgcolor='#1e1e2e', plot_bgcolor='#181825',
+    font=dict(color='#cdd6f4', family='Segoe UI, sans-serif', size=12),
+    xaxis=dict(gridcolor='#313244', linecolor='#313244', tickcolor='#a6adc8'),
+    yaxis=dict(gridcolor='#313244', linecolor='#313244', tickcolor='#a6adc8'),
+    legend=dict(bgcolor='#313244', bordercolor='#45475a'),
+    hoverlabel=dict(bgcolor='#313244', font_color='#cdd6f4'),
+    margin=dict(l=50, r=30, t=60, b=50),
+)
+
+def aplica_layout(fig, extra=None):
+    layout = dict(LAYOUT_BASE)
+    if extra:
+        layout.update(extra)
+    fig.update_layout(**layout)
+    return fig
+
+# ── API ───────────────────────────────────────────────────────────
+CLAVE_API = os.getenv('EODHD_API_KEY', '69b4102fe03158.38387378')
+URL_EOD   = 'https://eodhd.com/api/eod/'
+URL_INT   = 'https://eodhd.com/api/intraday/'
+
+_s = requests.Session()
+_s.mount('https://', HTTPAdapter(max_retries=Retry(
+    total=5, backoff_factor=0.5,
+    status_forcelist=[429,500,502,503,504],
+    allowed_methods=frozenset(['GET']))))
+
+LIMITES_DIAS = {
+    '1 minuto':118, '5 minutos':118, '15 minutos':118, '30 minutos':118,
+    '1 hora':595, '4 horas':595, '1 dia':3650,
+}
+
+TEMPS = {
+    '1 minuto':  ('1m', None,    True),
+    '5 minutos': ('5m', None,    True),
+    '15 minutos':('1m', '15min', True),
+    '30 minutos':('1m', '30min', True),
+    '1 hora':    ('1h', None,    True),
+    '4 horas':   ('1h', '4h',   True),
+    '1 dia':     ('d',  None,   False),
+}
+
+PARES = [
+    'EURUSD.FOREX','GBPUSD.FOREX','USDJPY.FOREX','USDCHF.FOREX',
+    'AUDUSD.FOREX','USDCAD.FOREX','NZDUSD.FOREX','EURGBP.FOREX',
+    'EURJPY.FOREX','GBPJPY.FOREX','EURCHF.FOREX','AUDJPY.FOREX',
+    'EURAUD.FOREX','EURCAD.FOREX','GBPCHF.FOREX','GBPAUD.FOREX',
+    'GBPCAD.FOREX','AUDCAD.FOREX','AUDCHF.FOREX','CADCHF.FOREX',
+    'NZDJPY.FOREX','NZDCAD.FOREX','NZDCHF.FOREX','NZDAUD.FOREX',
+    'USDHKD.FOREX','USDSGD.FOREX','USDMXN.FOREX','USDZAR.FOREX',
+    'XAUUSD.FOREX','XAGUSD.FOREX',
+]
+
+# Forex opera L-V. Domingo puede aparecer en intraday (apertura dominical).
+# Sabado NO existe en datos reales de Forex.
+DIAS_ES  = {0:'Lunes',1:'Martes',2:'Miercoles',3:'Jueves',4:'Viernes',6:'Domingo'}
+MESES_ES = {1:'Enero',2:'Febrero',3:'Marzo',4:'Abril',5:'Mayo',6:'Junio',
+             7:'Julio',8:'Agosto',9:'Septiembre',10:'Octubre',
+             11:'Noviembre',12:'Diciembre'}
+ORDEN_DIAS  = ['Lunes','Martes','Miercoles','Jueves','Viernes','Domingo']
+ORDEN_MESES = list(MESES_ES.values())
+
+DF_GLOBAL     = None
+TICKER_GLOBAL = ''
+TEMP_GLOBAL   = ''
+TABLES_GLOBAL = None
+
+def inicio_maximo(t):
+    return (datetime.today()-timedelta(days=LIMITES_DIAS.get(t,365))).strftime('%Y-%m-%d')
+
+# ─────────────────────────────────────────────────────────────────
+# DESCARGA
+# ─────────────────────────────────────────────────────────────────
+
+def _normalizar(df):
+    df = df.rename(columns={'open':'Open','high':'High','low':'Low',
+                             'close':'Close','volume':'Volume'})
+    for c in ['Open','High','Low','Close','Volume']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+        else:
+            df[c] = np.nan
+    return df[['Open','High','Low','Close','Volume']].dropna()
+
+def descargar_eod(ticker, ini, fin):
+    r = _s.get(URL_EOD+ticker,
+               params={'api_token':CLAVE_API,'fmt':'json','from':ini,'to':fin,'period':'d'},
+               timeout=60)
+    r.raise_for_status()
+    d = r.json()
+    if not isinstance(d, list) or not d: return None
+    df = pd.DataFrame(d)
+    df.index = pd.to_datetime(df['date'], errors='coerce')
+    df = df[df.index.dayofweek < 5].sort_index()
+    return _normalizar(df)
+
+def descargar_intraday(ticker, iv, ini, fin):
+    ts0 = int(pd.Timestamp(ini).timestamp())
+    ts1 = int(pd.Timestamp(fin+' 23:59:59').timestamp())
+    r = _s.get(URL_INT+ticker,
+               params={'api_token':CLAVE_API,'fmt':'json','interval':iv,'from':ts0,'to':ts1},
+               timeout=60)
+    r.raise_for_status()
+    d = r.json()
+    if not isinstance(d, list) or not d: return None
+    df = pd.DataFrame(d)
+    dc = 'datetime' if 'datetime' in df.columns else 'timestamp'
+    if df[dc].dtype in [np.int64, np.float64]:
+        df.index = pd.to_datetime(df[dc], unit='s', errors='coerce')
+    else:
+        df.index = pd.to_datetime(df[dc], errors='coerce')
+    df = df[df.index.dayofweek != 5].sort_index()  # sin sabado
+    return _normalizar(df)
+
+def obtener_datos(ticker, temp, ini, fin):
+    api_iv, rule, es_int = TEMPS[temp]
+    if not es_int:
+        return descargar_eod(ticker, ini, fin)
+    df = descargar_intraday(ticker, api_iv, ini, fin)
+    if df is None or df.empty: return None
+    if rule:
+        df = df.resample(rule).agg(
+            Open=('Open','first'), High=('High','max'),
+            Low=('Low','min'), Close=('Close','last'),
+            Volume=('Volume','sum')
+        ).dropna(subset=['Open','Close'])
+    return df
+
+# ─────────────────────────────────────────────────────────────────
+# METRICAS
+# ─────────────────────────────────────────────────────────────────
+
+def calcular_metricas(df):
+    d = df.copy()
+    O,H,L,C = d['Open'],d['High'],d['Low'],d['Close']
+
+    d['Range']          = (H-L).round(6)
+    d['Change']         = ((C-O)/O.replace(0,np.nan)*100).round(4)
+    d['UpperExtension'] = (H-O).round(6)
+    d['LowerExtension'] = (O-L).round(6)
+    rs = d['Range'].replace(0,np.nan)
+    d['Upper_pct'] = (d['UpperExtension']/rs*100).round(2)
+    d['Lower_pct'] = (d['LowerExtension']/rs*100).round(2)
+
+    neg = (C<O).astype(int).values
+    consec, cnt = [], 0
+    for v in neg:
+        cnt = cnt+1 if v else 0
+        consec.append(cnt)
+    d['ConsecNegatives'] = consec
+
+    pH,pL,pC = H.shift(1),L.shift(1),C.shift(1)
+
+    def vf(cond):
+        return np.where(pH.isna(),'N/A',np.where(cond,'VERDADERO','FALSO'))
+
+    d['OpenRelativeRange']     = np.where(pH.isna(),'N/A',
+                                  np.where(O>pH,'Above',np.where(O<pL,'Below','Inside')))
+    d['CHighTestedPriorHigh']  = vf(H>=pH)
+    d['LowTestedPriorLow']     = vf(L<=pL)
+    d['CHighTestedPriorLow']   = vf(H>=pL)
+    d['CLowTestedPriorHigh']   = vf(L<=pH)
+    d['OpenTypeRelativeClose'] = np.where(pC.isna(),'N/A',
+                                  np.where(O>pC,'Above',np.where(O<pC,'Below','Equal')))
+    d['CHighTestedPriorClose'] = vf(H>=pC)
+    d['CLowTestedPriorClose']  = vf(L<=pC)
+
+    hbo,lbo = H>pH, L<pL
+    d['isAtleastOneBreakout'] = np.where(pH.isna(),'N/A',
+                                 np.where(hbo&lbo,'Both Breakouts',
+                                 np.where(hbo,'Only High Breakout',
+                                 np.where(lbo,'Only Low Breakout','No Breakout'))))
+
+    d['NET_CLOSE_CHANGE'] = np.where(C>O,'POSITIVO',np.where(C<O,'NEGATIVO','NEUTRAL'))
+    d['NombreDia'] = [DIAS_ES.get(i,'?')  for i in d.index.dayofweek]
+    d['NombreMes'] = [MESES_ES.get(i,'?') for i in d.index.month]
+    d['Anio']      = d.index.year
+    return d
+
+# ─────────────────────────────────────────────────────────────────
+# EXPORT TXT
+# ─────────────────────────────────────────────────────────────────
+
+COLUMNAS = [
+    'Date','Time','Open','High','Low','Close','Volume',
+    'Range','Change','UpperExtension','LowerExtension','Upper_pct','Lower_pct',
+    'ConsecNegatives','OpenRelativeRange','CHighTestedPriorHigh',
+    'LowTestedPriorLow','CHighTestedPriorLow','CLowTestedPriorHigh',
+    'OpenTypeRelativeClose','CHighTestedPriorClose','CLowTestedPriorClose',
+    'isAtleastOneBreakout','NET_CLOSE_CHANGE','NombreDia','NombreMes','Anio',
+]
+
+def preparar_export(df):
+    out = df.copy()
+    out['Date'] = out.index.strftime('%d/%m/%Y')
+    out['Time'] = out.index.strftime('%H:%M:%S')
+    cols = [c for c in COLUMNAS if c in out.columns]
+    return out[cols].reset_index(drop=True)
+
+# ─────────────────────────────────────────────────────────────────
+# TABLAS ESTADISTICAS
+# ─────────────────────────────────────────────────────────────────
+
+def freq_pct(df, col, group=None):
+    d = df[df[col]!='N/A'].copy()
+    if group:
+        tbl = d.groupby([group,col]).size().unstack(fill_value=0)
+        pct = tbl.div(tbl.sum(axis=1),axis=0).mul(100).round(1)
+        return tbl, pct
+    cnt = d[col].value_counts()
+    pct = (cnt/cnt.sum()*100).round(1)
+    return pd.DataFrame({'Conteo':cnt,'%':pct})
+
+def build_tables(df):
+    T = {}
+    cols_cat = [
+        'NET_CLOSE_CHANGE','OpenRelativeRange','OpenTypeRelativeClose',
+        'isAtleastOneBreakout','CHighTestedPriorHigh','LowTestedPriorLow',
+        'CHighTestedPriorLow','CLowTestedPriorHigh',
+        'CHighTestedPriorClose','CLowTestedPriorClose',
+    ]
+    for col in cols_cat:
+        if col in df.columns:
+            T['dist_'+col] = freq_pct(df, col)
+
+    # Por dia
+    df_d = df.copy()
+    dias_p = [d for d in ORDEN_DIAS if d in df_d['NombreDia'].values]
+    df_d['NombreDia'] = pd.Categorical(df_d['NombreDia'], categories=dias_p, ordered=True)
+    T['dia_cnt'], T['dia_pct'] = freq_pct(df_d, 'NET_CLOSE_CHANGE', 'NombreDia')
+    T['dias_p']  = dias_p
+    T['range_dia'] = df_d.groupby('NombreDia')['Range'].median()
+
+    # Por mes
+    df_m = df.copy()
+    meses_p = [m for m in ORDEN_MESES if m in df_m['NombreMes'].values]
+    df_m['NombreMes'] = pd.Categorical(df_m['NombreMes'], categories=meses_p, ordered=True)
+    T['mes_cnt'], T['mes_pct'] = freq_pct(df_m, 'NET_CLOSE_CHANGE', 'NombreMes')
+    T['meses_p'] = meses_p
+
+    # Por anio
+    df_y = df.copy()
+    df_y['Anio'] = df_y['Anio'].astype(str)
+    T['year_cnt'], T['year_pct'] = freq_pct(df_y, 'NET_CLOSE_CHANGE', 'Anio')
+
+    # Cruces
+    cruces = [
+        'OpenRelativeRange','OpenTypeRelativeClose','isAtleastOneBreakout',
+        'CHighTestedPriorHigh','LowTestedPriorLow',
+        'CHighTestedPriorLow','CLowTestedPriorHigh',
+        'CHighTestedPriorClose','CLowTestedPriorClose',
+    ]
+    for col in cruces:
+        if col in df.columns:
+            T['cruce_'+col+'_cnt'], T['cruce_'+col+'_pct'] = freq_pct(df, 'NET_CLOSE_CHANGE', col)
+
+    # Heatmap dia x mes
+    df_h = df[df['NET_CLOSE_CHANGE'].isin(['POSITIVO','NEGATIVO','NEUTRAL'])].copy()
+    df_h['esPos'] = (df_h['NET_CLOSE_CHANGE']=='POSITIVO').astype(int)
+    df_h['NombreDia'] = pd.Categorical(df_h['NombreDia'], categories=dias_p, ordered=True)
+    df_h['NombreMes'] = pd.Categorical(df_h['NombreMes'], categories=meses_p, ordered=True)
+    T['heatmap'] = (df_h.groupby(['NombreDia','NombreMes'])['esPos']
+                        .mean().mul(100).round(1).unstack('NombreMes'))
+
+    # Stats numericas
+    cols_n = [c for c in ['Range','Change','UpperExtension','LowerExtension','Upper_pct','Lower_pct'] if c in df.columns]
+    desc = df[cols_n].describe(percentiles=[.1,.25,.5,.75,.9,.95]).T
+    desc.columns = ['N','Media','Std','Min','P10','Q25','Mediana','Q75','P90','P95','Max']
+    T['num_stats'] = desc
+
+    # ConsecNegatives
+    cnt_c = df['ConsecNegatives'].value_counts().sort_index()
+    T['consec'] = pd.DataFrame({'Conteo':cnt_c,'%':(cnt_c/len(df)*100).round(2)})
+
+    # Por franja horaria (solo intraday)
+    T['franjas'] = None
+    if df.index.dtype != 'object' and hasattr(df.index, 'hour'):
+        # Solo tiene sentido si hay mas de un valor de hora distinto
+        horas_unicas = df.index.strftime('%H:%M').nunique()
+        if horas_unicas > 1:
+            d2 = df.copy()
+            d2['_franja'] = d2.index.strftime('%H:%M')
+            d2['_prev_close'] = d2['Close'].shift(1)
+            d2['_prev_high']  = d2['High'].shift(1)
+            d2['_prev_low']   = d2['Low'].shift(1)
+            # Apertura vs cierre anterior
+            d2['_ap'] = 'Igual'
+            d2.loc[d2['Open'] > d2['_prev_close'], '_ap'] = 'Arriba'
+            d2.loc[d2['Open'] < d2['_prev_close'], '_ap'] = 'Abajo'
+            # Resultado vela
+            d2['_res'] = 'NEUTRAL'
+            d2.loc[d2['Close'] > d2['Open'], '_res'] = 'POSITIVO'
+            d2.loc[d2['Close'] < d2['Open'], '_res'] = 'NEGATIVO'
+            rows = []
+            for franja, g in d2.groupby('_franja'):
+                n = len(g)
+                if n < 3: continue
+                ap = g['_ap'].value_counts()
+                rs = g['_res'].value_counts()
+                rows.append({
+                    'Franja': franja,
+                    'N': n,
+                    'Abre_Arriba_%':  round(ap.get('Arriba',0)/n*100,1),
+                    'Abre_Igual_%':   round(ap.get('Igual', 0)/n*100,1),
+                    'Abre_Abajo_%':   round(ap.get('Abajo', 0)/n*100,1),
+                    'Cierre_Pos_%':   round(rs.get('POSITIVO',0)/n*100,1),
+                    'Cierre_Neg_%':   round(rs.get('NEGATIVO',0)/n*100,1),
+                    'Cierre_Neu_%':   round(rs.get('NEUTRAL', 0)/n*100,1),
+                    'High_Testa_%':   round((g['High'] >= g['_prev_high'].fillna(float('inf'))).sum()/n*100,1) if g['_prev_high'].notna().any() else 0,
+                    'Low_Testa_%':    round((g['Low']  <= g['_prev_low'].fillna(float('-inf'))).sum()/n*100,1) if g['_prev_low'].notna().any() else 0,
+                    'Range_Med':      round(g['Range'].median(),6),
+                })
+            if rows:
+                T['franjas'] = pd.DataFrame(rows).set_index('Franja')
+    return T
+
+# ─────────────────────────────────────────────────────────────────
+# GRAFICOS PLOTLY
+# ─────────────────────────────────────────────────────────────────
+
+BAR_COLORS = {'POSITIVO':'#a6e3a1','NEGATIVO':'#f38ba8','NEUTRAL':'#f9e2af'}
+
+def fig_barras_dist(tbl_df, titulo):
+    vals = tbl_df['%'].sort_values(ascending=True)
+    colors = [BAR_COLORS.get(i,'#89b4fa') for i in vals.index]
+    fig = go.Figure(go.Bar(
+        y=vals.index.astype(str), x=vals.values,
+        orientation='h', marker_color=colors,
+        text=[f'{v:.1f}%' for v in vals.values],
+        textposition='outside',
+        hovertemplate='<b>%{y}</b>: %{x:.1f}%<extra></extra>',
+    ))
+    fig.add_vline(x=50, line_dash='dot', line_color='#a6adc8', opacity=0.6)
+    return aplica_layout(fig, {
+        'title':dict(text=titulo, font=dict(size=14,color='#cdd6f4')),
+        'xaxis_title':'%', 'xaxis_range':[0,115],
+        'height':max(200, len(vals)*55+80), 'showlegend':False,
+    })
+
+def fig_barras_apiladas(pct_df, titulo, xlabel=''):
+    cats = pct_df.index.tolist()
+    orden = [c for c in ['POSITIVO','NEUTRAL','NEGATIVO'] if c in pct_df.columns]
+    fig = go.Figure()
+    for v in orden:
+        fig.add_trace(go.Bar(
+            name=v, x=[str(c) for c in cats], y=pct_df[v].values,
+            marker_color=BAR_COLORS[v],
+            text=[f'{x:.1f}%' for x in pct_df[v].values],
+            textposition='inside',
+            textfont=dict(size=11, color='#1e1e2e'),
+            hovertemplate=f'<b>%{{x}}</b> - {v}: %{{y:.1f}}%<extra></extra>',
+        ))
+    fig.add_hline(y=50, line_dash='dot', line_color='#a6adc8', opacity=0.5)
+    return aplica_layout(fig, {
+        'barmode':'stack',
+        'title':dict(text=titulo, font=dict(size=14,color='#cdd6f4')),
+        'xaxis_title':xlabel, 'yaxis_title':'%',
+        'yaxis_range':[0,105], 'height':400,
+        'legend':dict(orientation='h',yanchor='bottom',y=1.02,xanchor='right',x=1),
+    })
+
+def fig_solo_positivo(pct_df, titulo, xlabel=''):
+    if 'POSITIVO' not in pct_df.columns:
+        return go.Figure()
+    vals = pct_df['POSITIVO']
+    colors = ['#a6e3a1' if v>=50 else '#f38ba8' for v in vals.values]
+    fig = go.Figure(go.Bar(
+        x=[str(c) for c in vals.index], y=vals.values,
+        marker_color=colors,
+        text=[f'{v:.1f}%' for v in vals.values],
+        textposition='outside',
+        hovertemplate='<b>%{x}</b>: %{y:.1f}% positivo<extra></extra>',
+    ))
+    fig.add_hline(y=50, line_dash='dash', line_color='#f9e2af',
+                  annotation_text='50%', annotation_position='right')
+    return aplica_layout(fig, {
+        'title':dict(text=titulo, font=dict(size=14,color='#cdd6f4')),
+        'xaxis_title':xlabel, 'yaxis_title':'% Cierres Positivos',
+        'yaxis_range':[0,105], 'height':380, 'showlegend':False,
+    })
+
+def fig_heatmap(hm_df, titulo):
+    z    = hm_df.values.astype(float)
+    text = [[f'{v:.1f}%' if not np.isnan(v) else '' for v in row] for row in z]
+    fig = go.Figure(go.Heatmap(
+        z=z,
+        x=hm_df.columns.tolist(),
+        y=hm_df.index.tolist(),
+        text=text, texttemplate='%{text}',
+        textfont=dict(size=12, color='#1e1e2e'),
+        colorscale=[[0.0,'#f38ba8'],[0.5,'#f9e2af'],[1.0,'#a6e3a1']],
+        zmin=30, zmax=70,
+        colorbar=dict(title='% Positivo',ticksuffix='%',tickfont=dict(color='#cdd6f4')),
+        hoverongaps=False,
+        hovertemplate='<b>%{y} - %{x}</b>: %{z:.1f}%<extra></extra>',
+    ))
+    return aplica_layout(fig, {
+        'title':dict(text=titulo, font=dict(size=14,color='#cdd6f4')),
+        'height':max(320, len(hm_df)*55+120),
+        'xaxis':dict(tickangle=40),
+    })
+
+def fig_histograma(df, col, titulo, color):
+    fig = go.Figure(go.Histogram(
+        x=df[col].dropna(), nbinsx=60,
+        marker_color=color, opacity=0.85,
+        hovertemplate='%{x:.5f}: %{y}<extra></extra>',
+    ))
+    med = df[col].median()
+    fig.add_vline(x=med, line_dash='dash', line_color='#f9e2af',
+                  annotation_text=f'Med: {med:.5f}', annotation_font_color='#f9e2af')
+    if col == 'Change':
+        fig.add_vline(x=0, line_dash='dot', line_color='#f38ba8',
+                      annotation_text='0', annotation_font_color='#f38ba8')
+    return aplica_layout(fig, {
+        'title':dict(text=titulo, font=dict(size=14,color='#cdd6f4')),
+        'xaxis_title':col, 'yaxis_title':'Frecuencia', 'height':350,
+    })
+
+def fig_range_dia(range_dia):
+    palette = ['#89b4fa','#cba6f7','#94e2d5','#fab387','#b4befe','#89dceb']
+    fig = go.Figure(go.Bar(
+        x=[str(d) for d in range_dia.index],
+        y=range_dia.values,
+        marker_color=palette[:len(range_dia)],
+        text=[f'{v:.5f}' for v in range_dia.values],
+        textposition='outside',
+        hovertemplate='<b>%{x}</b>: %{y:.5f}<extra></extra>',
+    ))
+    return aplica_layout(fig, {
+        'title':dict(text='Volatilidad - Range Mediano por Dia', font=dict(size=14,color='#cdd6f4')),
+        'yaxis_title':'Range mediano', 'height':350, 'showlegend':False,
+    })
+
+def fig_consec(consec_df):
+    top = consec_df.head(10)
+    fig = go.Figure(go.Bar(
+        x=top.index.astype(str), y=top['%'].values,
+        marker_color='#f38ba8',
+        text=[f'{v:.1f}%' for v in top['%'].values],
+        textposition='outside',
+        hovertemplate='%{x} consecutivos: %{y:.1f}%<extra></extra>',
+    ))
+    return aplica_layout(fig, {
+        'title':dict(text='Rachas Negativas Consecutivas', font=dict(size=14,color='#cdd6f4')),
+        'xaxis_title':'Dias consecutivos negativos', 'yaxis_title':'%',
+        'height':350, 'showlegend':False,
+    })
+
+def fig_scatter_ul(df):
+    sample = df[['Upper_pct','Lower_pct','NET_CLOSE_CHANGE']].dropna()
+    sample = sample.sample(min(3000,len(sample)), random_state=42)
+    fig = go.Figure()
+    for result, grp in sample.groupby('NET_CLOSE_CHANGE'):
+        fig.add_trace(go.Scatter(
+            x=grp['Upper_pct'], y=grp['Lower_pct'],
+            mode='markers', name=result,
+            marker=dict(color=BAR_COLORS.get(result,'#89b4fa'), size=4, opacity=0.45),
+            hovertemplate='Upper: %{x:.1f}%  Lower: %{y:.1f}%<extra></extra>',
+        ))
+    fig.add_hline(y=50, line_dash='dot', line_color='#45475a', opacity=0.6)
+    fig.add_vline(x=50, line_dash='dot', line_color='#45475a', opacity=0.6)
+    return aplica_layout(fig, {
+        'title':dict(text='Estructura de Vela: Upper% vs Lower%', font=dict(size=14,color='#cdd6f4')),
+        'xaxis_title':'Upper% = (High-Open)/Range x 100',
+        'yaxis_title':'Lower% = (Open-Low)/Range x 100',
+        'xaxis_range':[0,100], 'yaxis_range':[0,100], 'height':430,
+    })
+
+# ─────────────────────────────────────────────────────────────────
+# HELPERS HTML
+# ─────────────────────────────────────────────────────────────────
+
+def seccion(titulo, emoji, sub=''):
+    sub_html = f'<p style="color:#a6adc8;margin:2px 0 0 0;font-size:13px">{sub}</p>' if sub else ''
+    display(HTML(
+        f'<div style="background:#313244;padding:12px 18px;border-radius:8px;'
+        f'margin:24px 0 10px 0;border-left:4px solid #89b4fa">'
+        f'<span style="font-size:17px;font-weight:bold;color:#cdd6f4">{emoji} {titulo}</span>'
+        f'{sub_html}</div>'
+    ))
+
+def interpretacion(texto, color='#89b4fa'):
+    display(HTML(
+        f'<div style="background:#181825;border-left:3px solid {color};'
+        f'padding:10px 14px;border-radius:5px;margin:6px 0 16px 0;'
+        f'font-family:Segoe UI,sans-serif;font-size:13px;'
+        f'line-height:1.65;color:#cdd6f4">'
+        f'&#128161; {texto}</div>'
+    ))
+
+# ─────────────────────────────────────────────────────────────────
+# EXCEL CON MODELO DE DATOS
+# ─────────────────────────────────────────────────────────────────
+
+XL = {
+    'bg':'1e1e2e','surface':'181825','overlay':'313244',
+    'text':'cdd6f4','subtext':'a6adc8','blue':'89b4fa',
+    'green':'a6e3a1','red':'f38ba8','yellow':'f9e2af',
+    'sky':'89dceb','white':'ffffff','dark':'11111b',
+}
+
+def _fill(h): return PatternFill('solid', fgColor=h)
+def _font(h='cdd6f4', bold=False, sz=11):
+    return Font(color=h, bold=bold, size=sz, name='Segoe UI')
+def _aln(h='center', v='center'):
+    return Alignment(horizontal=h, vertical=v)
+def _brd():
+    s = Side(style='thin', color='45475a')
+    return Border(left=s, right=s, top=s, bottom=s)
+
+def header_row(ws, headers, row=1):
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=row, column=c, value=h)
+        cell.fill = _fill(XL['overlay'])
+        cell.font = _font(XL['blue'], bold=True)
+        cell.alignment = _aln()
+        cell.border = _brd()
+
+def write_pct_table(ws, pct_df, start_row, titulo, nota=''):
+    # titulo
+    tc = ws.cell(row=start_row, column=1, value=titulo)
+    tc.fill = _fill(XL['bg'])
+    tc.font = _font(XL['yellow'], bold=True, sz=12)
+    tc.alignment = _aln('left')
+    if len(pct_df.columns) > 0:
+        ws.merge_cells(start_row=start_row, start_column=1,
+                       end_row=start_row, end_column=len(pct_df.columns)+1)
+
+    # cabecera
+    headers = [pct_df.index.name or 'Categoria'] + list(pct_df.columns.astype(str))
+    header_row(ws, headers, row=start_row+1)
+
+    # datos
+    for ri, (idx, row_data) in enumerate(pct_df.iterrows(), start_row+2):
+        ic = ws.cell(row=ri, column=1, value=str(idx))
+        ic.fill = _fill(XL['surface'])
+        ic.font = _font(XL['text'], bold=True)
+        ic.alignment = _aln('left')
+        ic.border = _brd()
+        for ci, val in enumerate(row_data, 2):
+            cell = ws.cell(row=ri, column=ci)
+            if pd.isna(val):
+                cell.value = ''
+                cell.fill = _fill(XL['surface'])
+                cell.font = _font(XL['subtext'])
+            else:
+                v = float(val)
+                cell.value = round(v, 1)
+                cell.number_format = '0.0"%"'
+                if v >= 60:   cell.fill=_fill('40a02b'); cell.font=_font(XL['white'],bold=True)
+                elif v >= 55: cell.fill=_fill('64c062'); cell.font=_font('1e1e2e',bold=True)
+                elif v >= 50: cell.fill=_fill('a6e3a1'); cell.font=_font('1e1e2e')
+                elif v >= 45: cell.fill=_fill('f9e2af'); cell.font=_font('1e1e2e')
+                elif v >= 40: cell.fill=_fill('f38ba8'); cell.font=_font('1e1e2e')
+                else:         cell.fill=_fill('d20f39'); cell.font=_font(XL['white'],bold=True)
+            cell.alignment = _aln()
+            cell.border = _brd()
+
+    next_row = start_row + 3 + len(pct_df)
+    if nota:
+        nc = ws.cell(row=next_row, column=1, value='  ' + nota)
+        nc.fill = _fill(XL['bg'])
+        nc.font = _font(XL['subtext'], sz=9)
+        next_row += 2
+    return next_row
+
+def auto_width(ws, minw=10, maxw=32):
+    for col in ws.columns:
+        ml = max((len(str(cell.value or '')) for cell in col), default=0)
+        ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(ml+2,minw),maxw)
+
+def sheet_bg(ws, rows=200, cols=30):
+    f = _fill(XL['bg'])
+    for r in range(1, rows+1):
+        for c in range(1, cols+1):
+            ws.cell(row=r, column=c).fill = f
+
+def crear_excel(df, T, ticker, temp, nombre):
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    df_exp = preparar_export(df)
+
+    # ── Hoja Datos ────────────────────────────────────────────────
+    ws = wb.create_sheet('Datos')
+    sheet_bg(ws)
+    header_row(ws, df_exp.columns.tolist())
+    for ri, row in enumerate(df_exp.itertuples(index=False), 2):
+        for ci, val in enumerate(row, 1):
+            cell = ws.cell(row=ri, column=ci, value=val)
+            cell.fill = _fill(XL['surface'] if ri%2==0 else XL['bg'])
+            cell.font = _font(XL['text'])
+            cell.alignment = _aln()
+            cell.border = _brd()
+            col_name = df_exp.columns[ci-1]
+            if col_name == 'NET_CLOSE_CHANGE':
+                if val == 'POSITIVO': cell.fill=_fill('1a3a1a'); cell.font=_font(XL['green'])
+                elif val == 'NEGATIVO': cell.fill=_fill('3a1a1a'); cell.font=_font(XL['red'])
+    auto_width(ws)
+    ws.freeze_panes = 'A2'
+
+    # ── Hoja Resumen ──────────────────────────────────────────────
+    ws2 = wb.create_sheet('Resumen')
+    sheet_bg(ws2)
+    ws2.column_dimensions['A'].width = 38
+    ws2.column_dimensions['B'].width = 26
+    N = len(df)
+    pct_pos = (df['NET_CLOSE_CHANGE']=='POSITIVO').mean()*100
+    pct_neg = (df['NET_CLOSE_CHANGE']=='NEGATIVO').mean()*100
+    sesgo   = 'ALCISTA' if pct_pos>pct_neg+3 else 'BAJISTA' if pct_neg>pct_pos+3 else 'NEUTRAL'
+    pct_inside = (df['OpenRelativeRange']=='Inside').mean()*100
+    pct_bo = ((df['isAtleastOneBreakout']!='No Breakout')&(df['isAtleastOneBreakout']!='N/A')).mean()*100
+
+    kpis = [
+        ('PAR', ticker), ('TEMPORALIDAD', temp), ('TOTAL VELAS', N),
+        ('PERIODO INICIO', str(df.index[0].date())),
+        ('PERIODO FIN',    str(df.index[-1].date())),
+        ('',''),
+        ('SESGO GENERAL', sesgo),
+        ('% Velas POSITIVAS',  f'{pct_pos:.1f}%'),
+        ('% Velas NEGATIVAS',  f'{pct_neg:.1f}%'),
+        ('% Apertura Inside',  f'{pct_inside:.1f}%'),
+        ('% Con algun Breakout', f'{pct_bo:.1f}%'),
+        ('Range Mediano',      f"{df['Range'].median():.5f}"),
+        ('Change Mediano',     f"{df['Change'].median():.4f}%"),
+        ('Upper_pct Mediano',  f"{df['Upper_pct'].median():.1f}%"),
+        ('Lower_pct Mediano',  f"{df['Lower_pct'].median():.1f}%"),
+        ('Racha negativa max', f"{int(df['ConsecNegatives'].max())} velas"),
+    ]
+    if 'POSITIVO' in T['dia_pct'].columns:
+        kpis += [
+            ('Dia mas alcista',  f"{T['dia_pct']['POSITIVO'].idxmax()} ({T['dia_pct']['POSITIVO'].max():.1f}%)"),
+            ('Dia mas bajista',  f"{T['dia_pct']['POSITIVO'].idxmin()} ({T['dia_pct']['POSITIVO'].min():.1f}%)"),
+        ]
+    if 'POSITIVO' in T['mes_pct'].columns:
+        kpis += [
+            ('Mes mas alcista',  f"{T['mes_pct']['POSITIVO'].idxmax()} ({T['mes_pct']['POSITIVO'].max():.1f}%)"),
+            ('Mes mas bajista',  f"{T['mes_pct']['POSITIVO'].idxmin()} ({T['mes_pct']['POSITIVO'].min():.1f}%)"),
+        ]
+
+    title_c = ws2.cell(row=1, column=1, value=f'RESUMEN - {ticker} [{temp}]')
+    title_c.fill = _fill(XL['overlay'])
+    title_c.font = _font(XL['yellow'], bold=True, sz=14)
+    title_c.alignment = _aln('left')
+    ws2.merge_cells('A1:B1')
+
+    for ri, (label, val) in enumerate(kpis, 2):
+        lc = ws2.cell(row=ri, column=1, value=label)
+        vc = ws2.cell(row=ri, column=2, value=val)
+        if not label:
+            lc.fill = vc.fill = _fill(XL['bg']); continue
+        lc.fill = _fill(XL['surface'])
+        vc.fill = _fill(XL['bg'])
+        lc.font = _font(XL['subtext'], bold=True)
+        lc.alignment = _aln('left')
+        vc.alignment = _aln('left')
+        lc.border = vc.border = _brd()
+        if label == 'SESGO GENERAL':
+            if val=='ALCISTA': vc.fill=_fill('1a3a1a'); vc.font=_font(XL['green'],bold=True,sz=13)
+            elif val=='BAJISTA': vc.fill=_fill('3a1a1a'); vc.font=_font(XL['red'],bold=True,sz=13)
+            else: vc.font=_font(XL['yellow'],bold=True,sz=13)
+        else:
+            vc.font = _font(XL['text'])
+
+    # ── Hoja Por Dia ──────────────────────────────────────────────
+    ws3 = wb.create_sheet('Por Dia')
+    sheet_bg(ws3)
+    nr = write_pct_table(ws3, T['dia_pct'], 1,
+        f'% NET_CLOSE_CHANGE por Dia - {ticker}',
+        'Verde >= 50% positivo | Rojo < 50%')
+    # Range por dia
+    rd = T['range_dia'].reset_index()
+    header_row(ws3, ['Dia', 'Range Mediano (Volatilidad)'], row=nr+1)
+    for ri2, row in enumerate(rd.itertuples(index=False), nr+2):
+        c1 = ws3.cell(row=ri2, column=1, value=str(row[0]))
+        c2 = ws3.cell(row=ri2, column=2, value=round(float(row[1]),6))
+        c1.fill=c2.fill=_fill(XL['surface'])
+        c1.font=_font(XL['text'],bold=True); c2.font=_font(XL['sky'])
+        c1.alignment=c2.alignment=_aln()
+        c1.border=c2.border=_brd()
+    auto_width(ws3)
+
+    # ── Hoja Por Mes ──────────────────────────────────────────────
+    ws4 = wb.create_sheet('Por Mes')
+    sheet_bg(ws4)
+    write_pct_table(ws4, T['mes_pct'], 1, f'% NET_CLOSE_CHANGE por Mes - {ticker}')
+    auto_width(ws4)
+
+    # ── Hoja Por Anio ─────────────────────────────────────────────
+    ws5 = wb.create_sheet('Por Anio')
+    sheet_bg(ws5)
+    write_pct_table(ws5, T['year_pct'], 1, f'% NET_CLOSE_CHANGE por Anio - {ticker}')
+    auto_width(ws5)
+
+    # ── Hoja Heatmap ──────────────────────────────────────────────
+    ws6 = wb.create_sheet('Heatmap Dia x Mes')
+    sheet_bg(ws6)
+    hm = T['heatmap']
+    tc = ws6.cell(row=1, column=1, value='% Velas POSITIVAS por Dia x Mes')
+    tc.fill=_fill(XL['bg']); tc.font=_font(XL['yellow'],bold=True,sz=13)
+    ws6.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(hm.columns)+1)
+    ws6.cell(row=2,column=1,value='Dia \\ Mes').fill=_fill(XL['overlay'])
+    ws6.cell(row=2,column=1).font=_font(XL['blue'],bold=True)
+    ws6.cell(row=2,column=1).alignment=_aln()
+    for ci, mes in enumerate(hm.columns, 2):
+        c = ws6.cell(row=2, column=ci, value=str(mes))
+        c.fill=_fill(XL['overlay']); c.font=_font(XL['blue'],bold=True)
+        c.alignment=_aln(); c.border=_brd()
+    for ri, (dia, rd2) in enumerate(hm.iterrows(), 3):
+        dc = ws6.cell(row=ri, column=1, value=str(dia))
+        dc.fill=_fill(XL['surface']); dc.font=_font(XL['text'],bold=True)
+        dc.alignment=_aln(); dc.border=_brd()
+        for ci, val in enumerate(rd2, 2):
+            cell = ws6.cell(row=ri, column=ci)
+            cell.alignment=_aln(); cell.border=_brd()
+            if pd.isna(val):
+                cell.value='-'; cell.fill=_fill(XL['bg']); cell.font=_font(XL['subtext'])
+            else:
+                v = float(val)
+                cell.value=round(v,1); cell.number_format='0.0"%"'
+                if v>=62:   cell.fill=_fill('40a02b'); cell.font=_font(XL['white'],bold=True)
+                elif v>=57: cell.fill=_fill('64c062'); cell.font=_font('1e1e2e',bold=True)
+                elif v>=52: cell.fill=_fill('a6e3a1'); cell.font=_font('1e1e2e')
+                elif v>=48: cell.fill=_fill('f9e2af'); cell.font=_font('1e1e2e')
+                elif v>=43: cell.fill=_fill('f38ba8'); cell.font=_font('1e1e2e')
+                else:       cell.fill=_fill('d20f39'); cell.font=_font(XL['white'],bold=True)
+    auto_width(ws6)
+
+    # ── Hoja Cruces ───────────────────────────────────────────────
+    ws7 = wb.create_sheet('Cruces')
+    sheet_bg(ws7)
+    cur = 1
+    for col in ['OpenRelativeRange','OpenTypeRelativeClose','isAtleastOneBreakout',
+                'CHighTestedPriorHigh','LowTestedPriorLow',
+                'CHighTestedPriorLow','CLowTestedPriorHigh',
+                'CHighTestedPriorClose','CLowTestedPriorClose']:
+        key = 'cruce_'+col+'_pct'
+        if key not in T: continue
+        cur = write_pct_table(ws7, T[key], cur,
+            f'{col}  ->  NET_CLOSE_CHANGE (%)',
+            'Dado que se cumple la condicion, que % cierra POSITIVO?') + 1
+    auto_width(ws7)
+
+    # ── Hoja Stats Numericas ──────────────────────────────────────
+    ws8 = wb.create_sheet('Stats Numericas')
+    sheet_bg(ws8)
+    ns = T['num_stats'].reset_index()
+    ns.columns = ['Metrica'] + list(T['num_stats'].columns)
+    header_row(ws8, ns.columns.tolist())
+    for ri, row in enumerate(ns.itertuples(index=False), 2):
+        for ci, val in enumerate(row, 1):
+            cell = ws8.cell(row=ri, column=ci)
+            cell.value = round(float(val),6) if ci>1 else str(val)
+            cell.fill  = _fill(XL['surface'] if ri%2==0 else XL['bg'])
+            cell.font  = _font(XL['blue'] if ci==1 else XL['text'], bold=(ci==1))
+            cell.alignment = _aln()
+            cell.border = _brd()
+    auto_width(ws8)
+
+    # ── Hoja Rachas ───────────────────────────────────────────────
+    ws9 = wb.create_sheet('Rachas Negativas')
+    sheet_bg(ws9)
+    cc = T['consec'].copy()
+    cc['% Acumulado'] = cc['%'].cumsum().round(2)
+    header_row(ws9, ['Consecutivos','Conteo','%','% Acumulado'])
+    for ri, row in enumerate(cc.itertuples(), 2):
+        vals_row = [row.Index, row.Conteo, row._2, row._3]
+        for ci, val in enumerate(vals_row, 1):
+            cell = ws9.cell(row=ri, column=ci, value=val)
+            cell.fill = _fill(XL['surface'])
+            cell.font = _font(XL['red'] if ci==1 else XL['text'])
+            cell.alignment = _aln()
+            cell.border = _brd()
+    auto_width(ws9)
+
+    # ── Hoja Franjas Horarias ─────────────────────────────────────
+    if T.get('franjas') is not None:
+        ws_f = wb.create_sheet('Franjas Horarias')
+        sheet_bg(ws_f, rows=300, cols=12)
+        # Titulo
+        tc = ws_f.cell(row=1, column=1, value=f'PROBABILIDADES POR FRANJA HORARIA — {ticker} [{temp}]')
+        tc.fill = _fill(XL['overlay']); tc.font = _font(XL['yellow'], bold=True, sz=13)
+        tc.alignment = _aln('left')
+        ws_f.merge_cells(start_row=1, start_column=1, end_row=1, end_column=12)
+        # Subtitulo explicacion
+        sc = ws_f.cell(row=2, column=1, value=(
+            'Cada fila = una franja horaria del dia.  '
+            'Los % muestran con que frecuencia historica ocurre cada cosa en esa hora exacta.  '
+            'Colores: verde>=55% / amarillo 45-55% / rojo<=45%'
+        ))
+        sc.fill = _fill(XL['bg']); sc.font = _font(XL['subtext'], sz=9)
+        sc.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+        ws_f.merge_cells(start_row=2, start_column=1, end_row=2, end_column=12)
+        ws_f.row_dimensions[2].height = 28
+        # Cabeceras con explicacion
+        HDRS = [
+            ('Franja\n(HH:MM)', 'Hora y minuto de inicio de la vela'),
+            ('N\nMuestras',     'Cuantas velas historicas tiene esa franja'),
+            ('Abre\nARRIBA %',  'Open > Close_anterior: el precio salta hacia arriba al abrir'),
+            ('Abre\nIGUAL %',   'Open = Close_anterior: abre exactamente donde cerro'),
+            ('Abre\nABAJO %',   'Open < Close_anterior: el precio cae al abrir'),
+            ('Cierre\nPOS %',   'Close > Open: la vela cierra en verde (sube)'),
+            ('Cierre\nNEG %',   'Close < Open: la vela cierra en rojo (baja)'),
+            ('Cierre\nNEU %',   'Close = Open: la vela no se mueve'),
+            ('High\nTesta %',   'High >= High_anterior: alcanza o supera el maximo previo'),
+            ('Low\nTesta %',    'Low <= Low_anterior: alcanza o perfora el minimo previo'),
+            ('Range\nMediano',  'Amplitud tipica de la vela (volatilidad de esa hora)'),
+        ]
+        for ci, (h, _) in enumerate(HDRS, 1):
+            cell = ws_f.cell(row=3, column=ci, value=h)
+            cell.fill = _fill(XL['overlay']); cell.font = _font(XL['blue'], bold=True, sz=10)
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            cell.border = _brd()
+        ws_f.row_dimensions[3].height = 34
+        # Fila de subtexto explicativo (fila 4)
+        for ci, (_, sub) in enumerate(HDRS, 1):
+            cell = ws_f.cell(row=4, column=ci, value=sub)
+            cell.fill = _fill(XL['bg']); cell.font = _font(XL['subtext'], sz=8)
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            cell.border = _brd()
+        ws_f.row_dimensions[4].height = 28
+        # Datos
+        COLS = ['N','Abre_Arriba_%','Abre_Igual_%','Abre_Abajo_%',
+                'Cierre_Pos_%','Cierre_Neg_%','Cierre_Neu_%',
+                'High_Testa_%','Low_Testa_%','Range_Med']
+        franjas_df = T['franjas']
+        for ri, (franja, row) in enumerate(franjas_df.iterrows(), 5):
+            # Hora
+            fc = ws_f.cell(row=ri, column=1, value=franja)
+            fc.fill = _fill(XL['overlay']); fc.font = _font(XL['sky'], bold=True, sz=11)
+            fc.alignment = _aln(); fc.border = _brd()
+            for ci, col in enumerate(COLS, 2):
+                val = row[col]
+                cell = ws_f.cell(row=ri, column=ci)
+                cell.alignment = _aln(); cell.border = _brd()
+                if col == 'N':
+                    cell.value = int(val)
+                    cell.fill = _fill(XL['surface']); cell.font = _font(XL['subtext'])
+                elif col == 'Range_Med':
+                    cell.value = float(val)
+                    cell.number_format = '0.00000'
+                    cell.fill = _fill(XL['surface']); cell.font = _font(XL['sky'])
+                else:
+                    v = float(val)
+                    cell.value = v; cell.number_format = '0.0"%"'
+                    # Color: verde si alto en positivos/arriba, rojo si alto en negativos/abajo
+                    if col in ('Cierre_Pos_%','Abre_Arriba_%','High_Testa_%'):
+                        if v>=60:   cell.fill=_fill('40a02b'); cell.font=_font(XL['white'],bold=True)
+                        elif v>=55: cell.fill=_fill('a6e3a1'); cell.font=_font('1e1e2e')
+                        elif v>=45: cell.fill=_fill('f9e2af'); cell.font=_font('1e1e2e')
+                        elif v>=40: cell.fill=_fill('f38ba8'); cell.font=_font('1e1e2e')
+                        else:       cell.fill=_fill('d20f39'); cell.font=_font(XL['white'],bold=True)
+                    elif col in ('Cierre_Neg_%','Abre_Abajo_%','Low_Testa_%'):
+                        if v>=60:   cell.fill=_fill('d20f39'); cell.font=_font(XL['white'],bold=True)
+                        elif v>=55: cell.fill=_fill('f38ba8'); cell.font=_font('1e1e2e')
+                        elif v>=45: cell.fill=_fill('f9e2af'); cell.font=_font('1e1e2e')
+                        elif v>=40: cell.fill=_fill('a6e3a1'); cell.font=_font('1e1e2e')
+                        else:       cell.fill=_fill('40a02b'); cell.font=_font(XL['white'],bold=True)
+                    else:  # Neutral / Igual
+                        cell.fill=_fill(XL['surface']); cell.font=_font(XL['subtext'])
+        # Anchos
+        ws_f.column_dimensions['A'].width = 10
+        ws_f.column_dimensions['B'].width = 9
+        for ci in range(3, 12):
+            ws_f.column_dimensions[get_column_letter(ci)].width = 11
+        ws_f.freeze_panes = 'B5'
+
+    wb.save(nombre)
+    return nombre
+
+# ─────────────────────────────────────────────────────────────────
+# ANALISIS VISUAL PRINCIPAL
+# ─────────────────────────────────────────────────────────────────
+
+def mostrar_analisis(df, ticker, temp, T):
+    N = len(df)
+    pct_pos = (df['NET_CLOSE_CHANGE']=='POSITIVO').mean()*100
+    pct_neg = (df['NET_CLOSE_CHANGE']=='NEGATIVO').mean()*100
+    sesgo   = 'ALCISTA' if pct_pos>pct_neg+3 else 'BAJISTA' if pct_neg>pct_pos+3 else 'NEUTRAL'
+    color_s = '#a6e3a1' if sesgo=='ALCISTA' else '#f38ba8' if sesgo=='BAJISTA' else '#f9e2af'
+
+    display(HTML(
+        f'<div style="background:#181825;border:1px solid #313244;border-radius:10px;padding:16px 20px;margin:10px 0">'
+        f'<h2 style="color:#89b4fa;margin:0;font-family:Segoe UI">Analisis Estadistico Interactivo</h2>'
+        f'<p style="color:#a6adc8;margin:5px 0 0 0">'
+        f'<b style="color:#cdd6f4">{ticker}</b> | <b style="color:#cdd6f4">{temp}</b> | '
+        f'{N:,} velas | {df.index[0].strftime("%d/%m/%Y")} - {df.index[-1].strftime("%d/%m/%Y")}'
+        f'</p></div>'
+    ))
+
+    # 1. Distribuciones generales
+    seccion('1. Distribuciones Generales', '📊',
+            'Frecuencia de cada resultado en todas las columnas categoricas')
+
+    fig_barras_dist(T['dist_NET_CLOSE_CHANGE'],
+        f'NET_CLOSE_CHANGE - {ticker} [{temp}] - {N:,} velas').show()
+    interpretacion(
+        f'Sesgo general: <b style="color:{color_s}">{sesgo}</b> '
+        f'({pct_pos:.1f}% positivo / {pct_neg:.1f}% negativo). '
+        f'{"Diferencia >3pp: tendencia estadistica clara." if abs(pct_pos-pct_neg)>3 else "Distribucion equilibrada: sin sesgo claro."}',
+        color_s)
+
+    info_cols = {
+        'OpenRelativeRange':     ('#89dceb', 'Inside mayoritario = mercado consolidativo. Above/Below frecuente = tendencial o con gaps.'),
+        'OpenTypeRelativeClose': ('#cba6f7', 'Indica si el mercado abre habitualmente en gap respecto al cierre anterior.'),
+        'isAtleastOneBreakout':  ('#fab387', 'No Breakout dominante = rango comprimido. Both Breakouts frecuente = alta volatilidad e indecision.'),
+    }
+    for col, (color, txt) in info_cols.items():
+        if 'dist_'+col in T:
+            fig_barras_dist(T['dist_'+col], col).show()
+            interpretacion(txt, color)
+
+    bool_info = {
+        'CHighTestedPriorHigh': ('#a6e3a1','VERDADERO alto = prueba resistencias constantemente (momentum alcista o distribucion).'),
+        'LowTestedPriorLow':    ('#f38ba8','VERDADERO alto = prueba soportes frecuentemente (presion bajista o acumulacion).'),
+        'CHighTestedPriorLow':  ('#94e2d5','VERDADERO alto = rebounds fuertes; el High recupera el Low previo.'),
+        'CLowTestedPriorHigh':  ('#f9e2af','VERDADERO alto = retrocesos fuertes desde resistencias; posibles trampas alcistas.'),
+        'CHighTestedPriorClose':('#b4befe','VERDADERO alto = mercado tendencial. Bajo = gaps frecuentes.'),
+        'CLowTestedPriorClose': ('#f5c2e7','VERDADERO alto = presion bajista o alta volatilidad descendente.'),
+    }
+    for col, (color, txt) in bool_info.items():
+        if 'dist_'+col in T:
+            fig_barras_dist(T['dist_'+col], col).show()
+            interpretacion(txt, color)
+
+    # 2. Por dia
+    seccion('2. Probabilidades por Dia de la Semana', '📅',
+            'Que dias tienen mayor/menor probabilidad de cierre positivo?')
+    fig_barras_apiladas(T['dia_pct'], f'Resultado por Dia - {ticker}', 'Dia').show()
+    fig_solo_positivo(T['dia_pct'], '% Cierres POSITIVOS por Dia', 'Dia').show()
+    if 'POSITIVO' in T['dia_pct'].columns:
+        md = T['dia_pct']['POSITIVO'].idxmax()
+        pd2 = T['dia_pct']['POSITIVO'].idxmin()
+        mx = T['dia_pct']['POSITIVO'].max()
+        mn = T['dia_pct']['POSITIVO'].min()
+        df2 = mx - mn
+        fz = 'significativa' if df2>10 else 'moderada' if df2>5 else 'debil'
+        interpretacion(
+            f'Dia mas alcista: <b>{md}</b> ({mx:.1f}%) - Dia mas bajista: <b>{pd2}</b> ({mn:.1f}%). '
+            f'Diferencia: <b>{df2:.1f} pp</b> (relevancia {fz}). '
+            f'{"Puedes usar el dia como filtro adicional." if df2>8 else "El dia de la semana no aporta ventaja estadistica clara."}',
+            '#a6e3a1')
+    fig_range_dia(T['range_dia']).show()
+    dv = T['range_dia'].idxmax()
+    dc2 = T['range_dia'].idxmin()
+    interpretacion(f'Dia mas volatil: <b>{dv}</b> - Dia mas tranquilo: <b>{dc2}</b>. Util para ajustar stops y targets.', '#89dceb')
+
+    # 3. Por mes
+    seccion('3. Probabilidades por Mes', '📆',
+            'Estacionalidad mensual - que meses son historicamente mas alcistas?')
+    fig_barras_apiladas(T['mes_pct'], f'Resultado por Mes - {ticker}', 'Mes').show()
+    fig_solo_positivo(T['mes_pct'], '% Cierres POSITIVOS por Mes', 'Mes').show()
+    if 'POSITIVO' in T['mes_pct'].columns:
+        mm = T['mes_pct']['POSITIVO'].idxmax()
+        pm2 = T['mes_pct']['POSITIVO'].idxmin()
+        mxm = T['mes_pct']['POSITIVO'].max()
+        mnm = T['mes_pct']['POSITIVO'].min()
+        dm = mxm - mnm
+        interpretacion(
+            f'Mes mas alcista: <b>{mm}</b> ({mxm:.1f}%) - Mes mas bajista: <b>{pm2}</b> ({mnm:.1f}%). '
+            f'Estacionalidad de {dm:.1f} pp. '
+            f'{"Filtrar por meses fuertes puede mejorar win rate." if dm>12 else "Estacionalidad baja."}',
+            '#fab387')
+
+    if 'year_pct' in T and not T['year_pct'].empty:
+        fig_barras_apiladas(T['year_pct'], 'Resultado por Anio', 'Anio').show()
+        interpretacion('Evolucion interanual del sesgo. Util para detectar regimenes de mercado.', '#cba6f7')
+
+    # 4. Cruces
+    seccion('4. Analisis Cruzados: Condicion -> Resultado', '🔀',
+            'Dado que se cumple la condicion de apertura, que % cierra positivo/negativo?')
+    cruces_data = [
+        ('OpenRelativeRange',     '#89dceb', 'Posicion de apertura vs rango anterior. Indica si abrir en gap favorece o perjudica.'),
+        ('OpenTypeRelativeClose', '#cba6f7', 'Apertura sobre/bajo el cierre anterior. El gap de apertura, tiene continuacion?'),
+        ('isAtleastOneBreakout',  '#fab387', 'Tipo de ruptura del rango previo. Los breakouts se sostienen o revierten?'),
+        ('CHighTestedPriorHigh',  '#a6e3a1', 'Cuando el High testa la resistencia anterior, el dia cierra alcista o bajista?'),
+        ('LowTestedPriorLow',     '#f38ba8', 'Cuando el Low testa el soporte anterior, hay rebote o continuacion bajista?'),
+        ('CHighTestedPriorLow',   '#94e2d5', 'Recuperar el Low previo con el High indica fortaleza. Se confirma en el cierre?'),
+        ('CLowTestedPriorHigh',   '#f9e2af', 'Bajar al High previo con el Low indica debilidad. El cierre lo confirma?'),
+        ('CHighTestedPriorClose', '#b4befe', 'Alcanzar el cierre anterior con el High. Relevante para gap fill.'),
+        ('CLowTestedPriorClose',  '#f5c2e7', 'Bajar del cierre anterior con el Low. Extension bajista desde nivel de cierre previo.'),
+    ]
+    for col, color, txt in cruces_data:
+        key = 'cruce_'+col+'_pct'
+        if key not in T: continue
+        pct_c = T[key]
+        fig_barras_apiladas(pct_c, f'{col}  ->  Resultado de Cierre', col).show()
+        if 'POSITIVO' in pct_c.columns:
+            mc = pct_c['POSITIVO'].idxmax()
+            pc3 = pct_c['POSITIVO'].idxmin()
+            mxc = pct_c['POSITIVO'].max()
+            mnc = pct_c['POSITIVO'].min()
+            dc3 = mxc - mnc
+            fzc = 'fuerte' if dc3>15 else 'moderada' if dc3>7 else 'debil'
+            interpretacion(
+                f'{txt}<br>'
+                f'Condicion mas favorable: <b>{mc}</b> ({mxc:.1f}%) - '
+                f'Menos favorable: <b>{pc3}</b> ({mnc:.1f}%). '
+                f'Poder predictivo <b>{fzc}</b> ({dc3:.1f} pp).',
+                color)
+
+    # 5. Heatmap
+    seccion('5. Heatmap: % Cierres Positivos - Dia x Mes', '🗺️',
+            'Verde = historico alcista | Rojo = historico bajista')
+    fig_heatmap(T['heatmap'], f'% Velas POSITIVAS - {ticker} [{temp}]').show()
+    hm_flat = T['heatmap'].stack().dropna()
+    if not hm_flat.empty:
+        best = hm_flat.idxmax(); bv = hm_flat.max()
+        worst= hm_flat.idxmin(); wv = hm_flat.min()
+        interpretacion(
+            f'Combinacion mas alcista: <b>{best[0]} de {best[1]}</b> ({bv:.1f}%). '
+            f'Mas bajista: <b>{worst[0]} de {worst[1]}</b> ({wv:.1f}%). '
+            f'Usa este mapa como filtro de confluencia.',
+            '#94e2d5')
+
+    # 6. Range y Change
+    seccion('6. Distribucion de Range y Change%', '📈',
+            'Amplitud tipica de velas y distribucion del movimiento desde apertura')
+    fig_histograma(df, 'Range',  f'Distribucion del Range - {ticker}', '#89dceb').show()
+    fig_histograma(df, 'Change', f'Distribucion del Change% - {ticker}', '#a6e3a1').show()
+    fig_scatter_ul(df).show()
+    up_m = df['Upper_pct'].median()
+    lo_m = df['Lower_pct'].median()
+    interpretacion(
+        f'Upper_pct mediano: <b>{up_m:.1f}%</b> - Lower_pct mediano: <b>{lo_m:.1f}%</b>. '
+        f'{"El precio se extiende MAS arriba desde la apertura." if up_m>lo_m+3 else "El precio se extiende MAS abajo desde la apertura." if lo_m>up_m+3 else "Extensiones simetricas: sin sesgo claro dentro de la vela."} '
+        f'En el scatter: Q2 (arriba-izquierda) = velas bajistas con mecha superior; Q4 = alcistas con mecha inferior.',
+        '#89dceb')
+
+    # 7. Rachas
+    seccion('7. Rachas Negativas Consecutivas', '🔴',
+            'Con que frecuencia se encadenan velas bajistas?')
+    fig_consec(T['consec']).show()
+    rm = int(df['ConsecNegatives'].max())
+    p1 = float(T['consec'].loc[1,'%']) if 1 in T['consec'].index else 0
+    p3 = float(T['consec'][T['consec'].index>=3]['%'].sum())
+    interpretacion(
+        f'Racha bajista maxima: <b>{rm} velas consecutivas</b>. '
+        f'{p1:.1f}% inician racha de solo 1 (sin continuacion). '
+        f'Rachas de 3+: <b>{p3:.1f}%</b>. '
+        f'{"Alta persistencia bajista: el mercado encadena rojas." if p3>15 else "Reversion rapida: rachas largas poco frecuentes."}',
+        '#f38ba8')
+
+    print('\nAnalisis interactivo completado.')
+
+
+print('✅ Funciones cargadas correctamente. Ejecuta Celda 3 para descargar datos.')
+
+# =============================================================================
+# CELDA 3 - Interfaz de Descarga
+# =============================================================================
+
+ST      = {'description_width': '145px'}
+LAY     = widgets.Layout(width='430px')
+LAY_BTN = widgets.Layout(width='240px', height='42px')
+
+w_par  = widgets.Dropdown(options=PARES, value='EURUSD.FOREX',
+                           description='Par Forex:', style=ST, layout=LAY)
+w_temp = widgets.Dropdown(options=list(TEMPS.keys()), value='1 dia',
+                           description='Temporalidad:', style=ST, layout=LAY)
+w_max  = widgets.Checkbox(value=True,
+                           description='Maximo de barras disponibles (recomendado)',
+                           layout=widgets.Layout(width='380px'))
+w_ini  = widgets.Text(value=inicio_maximo('1 dia'), description='Fecha inicio:',
+                       placeholder='YYYY-MM-DD', style=ST, layout=LAY, disabled=True)
+w_fin  = widgets.Text(value=datetime.today().strftime('%Y-%m-%d'),
+                       description='Fecha fin:', placeholder='YYYY-MM-DD',
+                       style=ST, layout=LAY)
+w_info = widgets.HTML(value='')
+w_btn  = widgets.Button(description='Descargar y procesar',
+                         button_style='success', layout=LAY_BTN)
+w_out  = widgets.Output()
+
+TIPS = {
+    '1 minuto':   (' ~120 dias. Archivos muy grandes.', '#f38ba8'),
+    '5 minutos':  (' ~120 dias.', '#f38ba8'),
+    '15 minutos': (' ~120 dias. Resamplea desde 1m.', '#fab387'),
+    '30 minutos': (' ~120 dias. Resamplea desde 1m.', '#fab387'),
+    '1 hora':     (' ~600 dias.', '#a6e3a1'),
+    '4 horas':    (' ~600 dias. Resamplea desde 1h.', '#a6e3a1'),
+    '1 dia':      (' Hasta 10 anios.', '#94e2d5'),
+}
+
+def actualizar_info(change=None):
+    t   = w_temp.value
+    ini = inicio_maximo(t)
+    msg, color = TIPS.get(t, ('', '#cdd6f4'))
+    w_info.value = (
+        f'<div style="background:#181825;padding:8px 12px;'
+        f'border-radius:6px;font-family:monospace;font-size:12px;'
+        f'color:{color};border-left:3px solid {color};margin:4px 0">'
+        f'{msg} &nbsp;|&nbsp; Inicio optimo: <b>{ini}</b></div>'
+    )
+    if w_max.value:
+        w_ini.value = ini
+
+def on_max(change):
+    w_ini.disabled = change['new']
+    if change['new']:
+        w_ini.value = inicio_maximo(w_temp.value)
+
+w_temp.observe(actualizar_info, names='value')
+w_max.observe(on_max, names='value')
+actualizar_info()
+
+def on_click(b):
+    global DF_GLOBAL, TICKER_GLOBAL, TEMP_GLOBAL, TABLES_GLOBAL
+    with w_out:
+        clear_output(wait=True)
+        ticker = w_par.value
+        temp   = w_temp.value
+        inicio = w_ini.value.strip()
+        fin    = w_fin.value.strip()
+        try:
+            datetime.strptime(inicio, '%Y-%m-%d')
+            datetime.strptime(fin,    '%Y-%m-%d')
+        except ValueError:
+            print('❌ Error: formato de fecha incorrecto. Usa YYYY-MM-DD'); return
+
+        print(f'⏳ Descargando {ticker} [{temp}]  {inicio} -> {fin}...')
+        try:
+            df_raw = obtener_datos(ticker, temp, inicio, fin)
+        except Exception as e:
+            print(f'❌ Error API: {e}'); return
+        if df_raw is None or df_raw.empty:
+            print('❌ Sin datos. Revisa ticker, fechas y plan API.'); return
+
+        print(f'✅ {len(df_raw):,} velas. Calculando metricas...')
+        df_calc = calcular_metricas(df_raw)
+        DF_GLOBAL, TICKER_GLOBAL, TEMP_GLOBAL = df_calc, ticker, temp
+
+        print('📊 Construyendo tablas estadisticas...')
+        TABLES_GLOBAL = build_tables(df_calc)
+
+        base  = ticker.replace('.FOREX','') + '_' + temp.replace(' ','_')
+        ntxt  = base + '.txt'
+        nxlsx = base + '_ModeloDatos.xlsx'
+
+        df_exp = preparar_export(df_calc)
+        df_exp.to_csv(ntxt, sep=';', index=False, lineterminator='\n')
+
+        print('📁 Generando Excel con modelo de datos...')
+        crear_excel(df_calc, TABLES_GLOBAL, ticker, temp, nxlsx)
+
+        print(f'\n✅ {len(df_calc):,} velas | {df_calc.index[0].date()} -> {df_calc.index[-1].date()}')
+        print(f'📄 TXT:   {ntxt}')
+        print(f'📊 Excel: {nxlsx}  (9 hojas con modelo de datos)')
+        print('📥 Descargando archivos...')
+        files.download(ntxt)
+        files.download(nxlsx)
+        print('\n✅ Ejecuta Celda 4 para ver los graficos interactivos.')
+
+w_btn.on_click(on_click)
+
+display(widgets.VBox([
+    widgets.HTML(
+        '<div style="background:#181825;border-radius:10px;padding:14px 18px;margin-bottom:8px">'
+        '<h2 style="color:#89b4fa;font-family:Segoe UI,sans-serif;margin:0">'
+        'Forex Collector - EODHD v4</h2>'
+        '<p style="color:#a6adc8;font-size:13px;margin:4px 0 0 0">'
+        'Gráficos interactivos Plotly - Excel con modelo de datos - Sin instalaciones extra</p></div>'
+    ),
+    w_par, w_temp, w_info, w_max, w_ini, w_fin,
+    widgets.HTML('<br>'), w_btn, w_out,
+], layout=widgets.Layout(padding='10px')))
+
+# =============================================================================
+# CELDA 4 - Gráficos Interactivos + Análisis Estadístico
+# =============================================================================
+
+if DF_GLOBAL is None:
+    print('⚠️ Primero descarga datos con la Celda 3.')
+else:
+    if TABLES_GLOBAL is None:
+        TABLES_GLOBAL = build_tables(DF_GLOBAL)
+    mostrar_analisis(DF_GLOBAL, TICKER_GLOBAL, TEMP_GLOBAL, TABLES_GLOBAL)
+
