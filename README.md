@@ -65,6 +65,22 @@ RECOMIENDO ANALIZAR BAJAS TEMPORALIDADES (1M,5M,15M) PARA IDENTIFICAR PATRONES D
 
 
 
-EN **RISK_MANAGEMENT_FX** SE ENCUENTRA EL CÓDIGO QUE SE RELACIONA CON MI OTRO REPOSITORIO DE ANÁLISIS DE RIESGO PERO ESTA VEZ APLICADO AL
-MERCADO FX. RECOMIENDO COMPAGINARLO CON TODO LO PUBLICADO EN ESTE REPOSITORIO.
+
+
+EN  **RISK_MANAGEMENT_FX**  SE ENCUENTRA EL CÓDIGO QUE SE RELACIONA CON MI OTRO REPOSITORIO DE ANÁLISIS DE RIESGO PERO ESTA VEZ APLICADO AL
+MERCADO FX.PARA USARLO DEBERÁS ABRIR GOOGLE COLLAB ; DARLE A +CÓDIGO Y PEGAR AHÍ LO QUE TE VOY PONIENDO ENTRE ## ""## ; TRAS EJECUTAR HAS DE
+DARLE A +CÓDIGO Y REPETIR EL PROCESO ( EN ORDEN ).RECOMIENDO COMPAGINARLO CON TODO LO PUBLICADO EN ESTE REPOSITORIO. 
+
+
+<img width="1786" height="885" alt="image" src="https://github.com/user-attachments/assets/e7b3b510-6013-494c-9a00-b073fa8c2e5e" />
+<img width="1586" height="983" alt="image" src="https://github.com/user-attachments/assets/b82fcd79-422e-4f8b-a176-756af7e7f4dd" />
+<img width="1586" height="983" alt="image" src="https://github.com/user-attachments/assets/d99f450d-7c02-4ddc-a08c-ff0385a7bbdd" />
+<img width="1587" height="487" alt="image" src="https://github.com/user-attachments/assets/37237ab9-82aa-4339-8b83-0ee0c4015c6f" />
+<img width="1587" height="885" alt="image" src="https://github.com/user-attachments/assets/ac7e24f7-dd0e-444b-bdf2-0295c4f535ee" />
+<img width="1587" height="591" alt="image" src="https://github.com/user-attachments/assets/4e582499-786e-46e7-8222-0040ee889501" />
+<img width="1786" height="591" alt="image" src="https://github.com/user-attachments/assets/47843020-8927-4f8a-a07d-85cfffb41c81" />
+<img width="1587" height="487" alt="image" src="https://github.com/user-attachments/assets/c19da559-68eb-4600-ba9c-ceacc795d3b4" />
+<img width="1632" height="1664" alt="image" src="https://github.com/user-attachments/assets/e24f0cc7-0471-478b-80bb-3dba7cb5ee46" />
+
+
 
